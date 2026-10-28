@@ -1,185 +1,103 @@
 #include <Arduino.h>
+#include <Wire.h>
 
-#define PACKAGE_HEADER_01 0xAA
-#define PACKAGE_HEADER_02 0x55
+const uint8_t MPU_addr          = 0x68;
+const uint8_t PWR_MGMT_ADDR     = 0x6B;
+const uint8_t GYRO_CONFIG_ADDR  = 0x1B;
+const uint8_t ACCEL_CONFIG_ADDR = 0x1C; 
 
-#define INVALID_PACKAGE 0x00
-#define VALID_PACKAGE 0x01
+const uint8_t A_XOUT_H = 0x3B;
+const uint8_t A_XOUT_L = 0x3C;
+const uint8_t A_YOUT_H = 0x3D;
+const uint8_t A_YOUT_L = 0x3E;
+const uint8_t A_ZOUT_H = 0x3F;
+const uint8_t A_ZOUT_L = 0x40;
 
+const uint8_t G_XOUT_H = 0x43;
+const uint8_t G_XOUT_L = 0x44;
+const uint8_t G_YOUT_H = 0x45;
+const uint8_t G_YOUT_L = 0x46;
+const uint8_t G_ZOUT_H = 0x47;
+const uint8_t G_ZOUT_L = 0x48;
 
-uint16_t check_package_valid();
-void print_package();
-void construct_package(uint8_t data);
-void process_data();
-void reset_data();
+int8_t XAxisH = 0;
+int8_t XAxisL = 0;
+int8_t YAxisH = 0;
+int8_t YAxisL = 0;
+int8_t ZAxisH = 0;
+int8_t ZAxisL = 0;
 
-
-unsigned int data_package_index = 0;
-typedef enum {NO_PACKAGE, POTENTIAL_PACKAGE, PACKAGE, POTENTIAL_PACKAGE_RESET} package_state;
-package_state state = NO_PACKAGE, special_state = NO_PACKAGE;
-uint8_t reset_package = 0;
-
-uint8_t cat = 0;
-uint8_t lsn = 0;
-uint16_t catlsn = 0;
-
-uint16_t fsa = 0, lsa = 0;
-uint16_t cs = 0;
-
-uint8_t data;
-uint8_t buffered_data;
-
-uint8_t  si_nibble_index = 0; // 0 => lower nibble | 1 = upper nibble
-uint16_t si_index = 0;
-uint16_t* si = nullptr;
+int16_t XAxisFull = 0;
+int16_t YAxisFull = 0;
+int16_t ZAxisFull = 0;
 
 void setup() {
-  Serial.begin(115200);
-  Serial1.begin(115200, SERIAL_8N1);
+  Serial.begin(115200); 
+  Wire.begin();
+
+  Wire.beginTransmission(MPU_addr);
+  Wire.write(PWR_MGMT_ADDR);
+  Wire.write(0x00);             // Internal 20MHz clock used
+  Wire.endTransmission(false);
+
+  delay(50);
+
+  Wire.beginTransmission(MPU_addr);
+  Wire.write(GYRO_CONFIG_ADDR);
+  Wire.write(0x10);             // 1000 dps used
+  Wire.endTransmission(false);
+
+  delay(50);
+
+  Wire.beginTransmission(MPU_addr);
+  Wire.write(ACCEL_CONFIG_ADDR); // accelerometer scale 2g
+  Wire.write(0x00);
+
+  Wire.endTransmission(true);
+  delay(50);
 }
 
 void loop() {
-  process_data();
-}
+  Serial.println("======== START PACKAGE ========");
 
-void process_data() {
-  while (Serial1.available()) {
-    data = Serial1.read();
+  Wire.beginTransmission(MPU_addr);
+  Wire.write(A_XOUT_H);
+  Wire.endTransmission(false);
+  Wire.requestFrom(MPU_addr, 6, true);
+  
+  XAxisFull =  (Wire.read() << 8 | Wire.read());
+  YAxisFull =  (Wire.read() << 8 | Wire.read());
+  ZAxisFull =  (Wire.read() << 8 | Wire.read());
 
-    if (state == NO_PACKAGE) {
-      if ((PACKAGE_HEADER_01 ^ data) == 0) {
-        state = POTENTIAL_PACKAGE;
-      }
-    } else if (state == POTENTIAL_PACKAGE) {
-      if ((PACKAGE_HEADER_02 ^ data) == 0) {
-        state = PACKAGE;
-      } else {
-        state = NO_PACKAGE;
-      }
-    } else if (state == PACKAGE) {
-      if ((PACKAGE_HEADER_01 ^ data) == 0 && special_state == NO_PACKAGE) {
-        special_state = POTENTIAL_PACKAGE_RESET;
-        buffered_data = data;
-      } 
-      else if (special_state == POTENTIAL_PACKAGE_RESET) {
-        if ((PACKAGE_HEADER_02 ^ data) == 0) {
-          state = PACKAGE;
-          special_state = NO_PACKAGE;
-          if (check_package_valid() == VALID_PACKAGE) {
-            print_package();
-          } 
-          reset_data();
-        } else {
-          if ((PACKAGE_HEADER_01 ^ data) == 0 ) {
-            construct_package(buffered_data);
-          } else {
-            special_state = NO_PACKAGE;
-            construct_package(buffered_data);
-            construct_package(data);
-          }
-        }
-      } else {
-        construct_package(data);
-      }
-    }
-  }
-}
+  Wire.endTransmission(false);
 
-void construct_package(uint8_t data) {
-  switch (data_package_index) {
-    case 0: // package type 
-      cat = data;
-      catlsn = data;
-      data_package_index++;
-      break;
-    case 1: // sample count
-      lsn = data;
-      catlsn += (data << 8);
-      data_package_index++;
-      break;
-    case 2: // first sample angle LSB
-      fsa += data;
-      data_package_index++;
-      break;
-    case 3: // first sample angle MSB
-      fsa += (data << 8); 
-      data_package_index++;
-      break;
-    case 4: // last sample angle LSB
-      lsa += data;
-      data_package_index++;
-      break;
-    case 5: // last sample angle MSB
-      lsa += (data << 8); 
-      data_package_index++;
-      break;
-    case 6: // checksum LSB
-      cs += data;
-      data_package_index++;
-      break;
-    case 7: // checksum MSB
-      cs += (data << 8); 
-      data_package_index++;
-      break;
-    default:
-      if (si == nullptr) {
-        si = (uint16_t *) calloc(lsn, sizeof(uint16_t));
-        if (si == nullptr) {
-          exit(1);
-        }
-      }
-      if (si_nibble_index == 0) {
-          si[si_index] += data; 
-          si_nibble_index = 1;
-        } else {
-          si[si_index] += (data << 8);
-          si[si_index] = (si[si_index] >> 2);
-          si_nibble_index = 0;
-          si_index++;
-        }
-      break;
-  }
-}
+  float XAxisFinal = (float) XAxisFull / 16384.0;
+  float YAxisFinal = (float) YAxisFull / 16384.0;
+  float ZAxisFinal = (float) ZAxisFull / 16384.0;
 
-uint16_t check_package_valid() {
-  uint16_t intermediary_cs = 0x55AA ^ catlsn ^ fsa ^ lsa;
-  for (uint16_t i = 0; i < lsn; i++) {
-    intermediary_cs ^= si[i];
-  }
-  return ((intermediary_cs ^ cs) == 0) ? VALID_PACKAGE : INVALID_PACKAGE; 
-}
+  Serial.print("X Axis = "); Serial.print(XAxisFinal); Serial.println("g");
+  Serial.print("Y Axis = "); Serial.print(YAxisFinal); Serial.println("g");
+  Serial.print("Z Axis = "); Serial.print(ZAxisFinal); Serial.println("g");
 
-void reset_data() {
-  if (si != nullptr) {
-    free(si);
-    si = nullptr;
-  }
-  cat = 0;
-  lsn = 0;
-  catlsn = 0;
-  fsa = 0;
-  lsa = 0;
-  cs = 0;
-  si_index = 0;
-  si_nibble_index = 0;
-  data_package_index = 0;
-}
+  Wire.endTransmission(false);
+  Wire.write(G_XOUT_H);
+  Wire.endTransmission(false);
+  Wire.requestFrom(MPU_addr, 6, true);
 
+  int16_t XGyroFull = Wire.read() << 8 | Wire.read();
+  int16_t YGyroFull = Wire.read() << 8 | Wire.read();
+  int16_t ZGyroFull = Wire.read() << 8 | Wire.read();
 
-void print_package() {
-  Serial.println("========== START PACKAGE DATA ==========");
-  Serial.print("PACKAGE HEADER: ");      Serial.print(0x55AA, HEX); Serial.print(" | ");
-  Serial.print("PACKAGE TYPE: ");        Serial.print(cat, HEX);    Serial.print(" | ");
-  Serial.print("LiDAR SAMPLE NUMBER: "); Serial.print(lsn, HEX);    Serial.print(" | ");
-  Serial.print("CATLSN: ");              Serial.print(catlsn, HEX); Serial.print(" | ");
-  Serial.print("FIRST SAMPLE ANGLE: ");  Serial.print(fsa, HEX);    Serial.print(" | ");
-  Serial.print("LAST SAMPLE ANGLE: ");   Serial.print(lsa, HEX);    Serial.print(" | ");
-  Serial.print("CHECKSUM: ");            Serial.print(cs,  HEX);    Serial.print(" | ");
-  Serial.print("MEASURED DISTANCES: ");         
-  for (uint16_t i = 0; i < lsn; i++) {
-    Serial.print(" "); Serial.print(si[i], HEX); Serial.print(" ");
-  }
-  Serial.println();
-  Serial.println("========== END PACKAGE DATA ==========");
-  Serial.println();Serial.println();
+  Wire.endTransmission(false);
+
+  float XGyroFinal = (float)XGyroFull/32.8;
+  float YGyroFinal = (float)YGyroFull/32.8;
+  float ZGyroFinal = (float)ZGyroFull/32.8;
+
+  Serial.print("X Axis = "); Serial.print(XGyroFinal); Serial.println(" deg/s"); 
+  Serial.print("Y Axis = "); Serial.print(YGyroFinal); Serial.println(" deg/s");
+  Serial.print("Z Axis = "); Serial.print(ZGyroFinal); Serial.println(" deg/s");
+
+  Serial.println("======== END PACKAGE ========\n\n");
+  delay(500);
 }
